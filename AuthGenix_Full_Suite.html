@@ -1105,29 +1105,14 @@
     }
 
     function initCleanAccountData() {
-        const usedSet = getUsedSet();
         const cleanData = {};
-
         for (const country of Object.keys(offlineData)) {
             cleanData[country] = {
                 male_first: [...offlineData[country].male_first],
                 female_first: [...offlineData[country].female_first],
                 last: [...offlineData[country].last],
-                username: offlineData[country].username.filter(u => !usedSet.has(`${country}_user_${u}`))
+                username: [...offlineData[country].username]
             };
-
-            // Trim first/last counts based on how many full names were already used in this country
-            let usedMaleCount = 0;
-            let usedFemaleCount = 0;
-            usedSet.forEach(k => {
-                if (k.startsWith(`${country}_male_pair_`)) usedMaleCount++;
-                if (k.startsWith(`${country}_female_pair_`)) usedFemaleCount++;
-            });
-
-            if (usedMaleCount > 0) cleanData[country].male_first.splice(0, usedMaleCount);
-            if (usedFemaleCount > 0) cleanData[country].female_first.splice(0, usedFemaleCount);
-            const totalUsedNames = usedMaleCount + usedFemaleCount;
-            if (totalUsedNames > 0) cleanData[country].last.splice(0, Math.min(totalUsedNames, cleanData[country].last.length));
         }
         return cleanData;
     }
@@ -1206,6 +1191,7 @@
     let autoPasteEnabled = false;
     let vaultPassword = localStorage.getItem('jih4d_vault_pass') || '';
     let igCounter = parseInt(localStorage.getItem('jih4d_ig_counter')) || 1;
+    let ttCounter = parseInt(localStorage.getItem('jih4d_tt_counter')) || 1;
     let customCounter = parseInt(localStorage.getItem('jih4d_custom_counter')) || 1;
 
     function saveVaultPassword(val) {
@@ -1526,7 +1512,7 @@
         }
 
         let formattedCounter = String(customCounter).padStart(2, '0');
-        let baseUsername = inputVal.toLowerCase().replace(/\s+/g, '_');
+        let baseUsername = inputVal.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
         let generatedUsername = `${baseUsername}_${formattedCounter}`;
         
         customCounter++; 
@@ -1790,40 +1776,28 @@
     }
 
     function getUniqueFullName(gender) {
-        let firstCategory = `${gender}_first`;
-        let firstList = window.accountData[selCoun][firstCategory];
-        let lastList = window.accountData[selCoun]["last"];
+        const firstList = window.accountData[selCoun]?.[`${gender}_first`] || [];
+        const lastList = window.accountData[selCoun]?.last || [];
         const usedSet = getUsedSet();
+        if (!firstList.length || !lastList.length) return null;
 
-        if (!firstList || firstList.length === 0 || !lastList || lastList.length === 0) {
-            return null;
-        }
-
-        // Pop the next sequential First Name & find a Last Name so Full Name is 100% unique
-        let fVal = firstList.shift();
-        let fName = typeof fVal === 'object' && fVal !== null ? fVal.name : fVal;
-        let fId = typeof fVal === 'object' && fVal !== null ? fVal.id : null;
-
-        let chosenLastIndex = 0;
-        for (let i = 0; i < lastList.length; i++) {
-            let candidateL = typeof lastList[i] === 'object' && lastList[i] !== null ? lastList[i].name : lastList[i];
-            let pairKey = `${selCoun}_${gender}_pair_${fName.toLowerCase()}_${candidateL.toLowerCase()}`;
-            if (!usedSet.has(pairKey)) {
-                chosenLastIndex = i;
-                break;
+        // Pick randomly from every unused first+last combination. Source lists are never mutated.
+        const available = [];
+        for (const firstVal of firstList) {
+            const fName = typeof firstVal === 'object' && firstVal !== null ? firstVal.name : firstVal;
+            for (const lastVal of lastList) {
+                const lName = typeof lastVal === 'object' && lastVal !== null ? lastVal.name : lastVal;
+                const normalizedPair = `${String(fName).toLowerCase()}_${String(lName).toLowerCase()}`;
+                const pairKey = `${selCoun}_pair_${normalizedPair}`;
+                const legacyMaleKey = `${selCoun}_male_pair_${normalizedPair}`;
+                const legacyFemaleKey = `${selCoun}_female_pair_${normalizedPair}`;
+                if (!usedSet.has(pairKey) && !usedSet.has(legacyMaleKey) && !usedSet.has(legacyFemaleKey)) available.push({ f: fName, l: lName, pairKey });
             }
         }
-
-        let lVal = lastList.splice(chosenLastIndex, 1)[0];
-        let lName = typeof lVal === 'object' && lVal !== null ? lVal.name : lVal;
-        let lId = typeof lVal === 'object' && lVal !== null ? lVal.id : null;
-
-        // Mark this exact Full Name as used permanently
-        markItemAsUsed(`${selCoun}_${gender}_pair_${fName.toLowerCase()}_${lName.toLowerCase()}`);
-
-        // Keep source names in Firestore. Used state is tracked locally; generation must not delete source data.
-
-        return { f: fName, l: lName };
+        if (!available.length) return null;
+        const chosen = available[Math.floor(Math.random() * available.length)];
+        markItemAsUsed(chosen.pairKey);
+        return { f: chosen.f, l: chosen.l };
     }
 
     function getSequentialUsername() {
@@ -1845,19 +1819,10 @@
 
     function generateIdentityData(g) {
         let nameObj = getUniqueFullName(g);
-        
-        let firstCount = window.accountData[selCoun][`${g}_first`] ? window.accountData[selCoun][`${g}_first`].length : 0;
-        let lastCount = window.accountData[selCoun]["last"] ? window.accountData[selCoun]["last"].length : 0;
-        let userCount = window.accountData[selCoun]["username"] ? window.accountData[selCoun]["username"].length : 0;
-        
-        let statsBadgeHTML = `
-            <div class="fade-in" style="font-size: 9px; color: var(--primary); margin-bottom: 12px; background: rgba(0,0,0,0.2); padding: 4px 10px; border-radius: 6px; display: inline-block; border: 1px solid var(--card-border); letter-spacing: 0.5px;">
-                DB: ${firstCount} First | ${lastCount} Last | ${userCount} Users
-            </div><br>
-        `;
+
 
         if (!nameObj) {
-            document.getElementById('identity-data-box').innerHTML = statsBadgeHTML + `
+            document.getElementById('identity-data-box').innerHTML = `
                 <div style="color: var(--danger); font-size: 12px; font-weight: 600; padding: 12px;">
                     ⚠️️ ৩,০০০ নামই ব্যবহার হয়ে গেছে! Dashboard থেকে Reset Used Names বাটনে ক্লিক করুন।
                 </div>
@@ -1865,47 +1830,65 @@
             return;
         }
 
-        let { f, l } = nameObj;
-        let resultTextHTML = statsBadgeHTML;
+        const { f, l } = nameObj;
+        const fullName = `${f} ${l}`;
+        const usernameBase = fullName.normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase().trim()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+        const randomNameLabel = `<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600;">Random Name</div>`;
+        const makeUniqueUsername = (platform) => {
+            const used = getUsedSet();
+            let candidate = '';
+            let attempts = 0;
+            do {
+                const randomPart = String(Math.floor(10 + Math.random() * 90));
+                candidate = `${usernameBase}_${randomPart}`;
+                attempts++;
+            } while (used.has(`${selCoun}_username_${candidate}`) && attempts < 500);
+            if (used.has(`${selCoun}_username_${candidate}`)) {
+                candidate = `${usernameBase}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+            }
+            markItemAsUsed(`${selCoun}_username_${candidate}`);
+            return candidate;
+        };
+
+        let resultTextHTML = '';
 
         if (selPlat === 'fb') {
-            let textToCopy = `${f} ${l}`;
             resultTextHTML += `
-                <div class="clickable-data fade-in" style="font-size: 16px; width:100%; text-align:center; margin-bottom:8px;" onclick="copyText('${textToCopy}', '👤 Name Copied!')">${textToCopy}</div>
-                <div style="display:flex; gap:8px;" class="fade-in">
-                    <div class="clickable-data" style="flex:1; text-align:center;" onclick="copyText('${f}', '👤 First Name Copied!')">${f}</div>
-                    <div class="clickable-data" style="flex:1; text-align:center;" onclick="copyText('${l}', '👤 Last Name Copied!')">${l}</div>
+                ${randomNameLabel}
+                <div class="clickable-data fade-in" style="font-size:16px;width:100%;text-align:center;margin-bottom:8px;" onclick="copyText('${fullName}', '👤 Name Copied!')">${fullName}</div>
+                <div style="display:flex;gap:8px;" class="fade-in">
+                    <div class="clickable-data" style="flex:1;text-align:center;" onclick="copyText('${f}', '👤 First Name Copied!')">${f}</div>
+                    <div class="clickable-data" style="flex:1;text-align:center;" onclick="copyText('${l}', '👤 Last Name Copied!')">${l}</div>
                 </div>
             `;
         } else if (selPlat === 'ig') {
-            let igUser = getSequentialUsername();
-            if (!igUser) {
-                let formattedCounter = String(igCounter).padStart(2, '0');
-                igUser = `${f.toLowerCase()}_${l.toLowerCase()}_${formattedCounter}`;
-                igCounter++; 
-                localStorage.setItem('jih4d_ig_counter', igCounter);
-            }
-            let fullName = `${f} ${l}`;
-            
+            const igUser = makeUniqueUsername('ig');
+
             resultTextHTML += `
-                <div class="clickable-data fade-in" style="font-size: 16px; width:100%; text-align:center; margin-bottom:8px;" onclick="copyText('${fullName}', '👤 Name Copied!')">${fullName}</div>
-                <div class="clickable-data fade-in" style="font-size: 15px; width:100%; text-align:center;" onclick="copyText('${igUser}', '📸 Username Copied!')">${igUser}</div>
+                ${randomNameLabel}
+                <div class="clickable-data fade-in" style="font-size:16px;width:100%;text-align:center;margin-bottom:8px;" onclick="copyText('${fullName}', '👤 Name Copied!')">${fullName}</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:600;">Username</div>
+                <div class="clickable-data fade-in" style="font-size:15px;width:100%;text-align:center;" onclick="copyText('${igUser}', '📸 Username Copied!')">${igUser}</div>
             `;
         } else if (selPlat === 'tt') {
-            let fullName = `${f} ${l}`;
-            let ttName = getSequentialUsername() || `${f.toLowerCase()}_${l.toLowerCase()}_tt`;
-            
+            const ttName = makeUniqueUsername('tt');
+
             resultTextHTML += `
-                <div class="clickable-data fade-in" style="font-size: 16px; width:100%; text-align:center; margin-bottom:8px;" onclick="copyText('${fullName}', '👤 Name Copied!')">${fullName}</div>
-                <div class="fade-in" style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight: 500;">Tiktok Username</div>
-                <div class="clickable-data fade-in" style="font-size: 15px; width:100%; text-align:center;" onclick="copyText('${ttName}', '🎵 Tiktok Username Copied!')">${ttName}</div>
+                ${randomNameLabel}
+                <div class="clickable-data fade-in" style="font-size:16px;width:100%;text-align:center;margin-bottom:8px;" onclick="copyText('${fullName}', '👤 Name Copied!')">${fullName}</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;font-weight:500;">Username</div>
+                <div class="clickable-data fade-in" style="font-size:15px;width:100%;text-align:center;" onclick="copyText('${ttName}', '🎵 Username Copied!')">${ttName}</div>
             `;
         }
 
         let passwordBlockHTML = vaultPassword ? `
-            <div class="divider fade-in" style="margin: 10px 0;"></div>
-            <div class="fade-in" style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight: 500;">Vault Password</div>
-            <div class="clickable-data fade-in" style="font-size: 13px; width:100%; text-align:center;" onclick="copyText('${vaultPassword.replace(/'/g, "\\'")}', '🔑 Password Copied!')">${vaultPassword}</div>
+            <div class="divider fade-in" style="margin:10px 0;"></div>
+            <div class="fade-in" style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:500;">Vault Password</div>
+            <div class="clickable-data fade-in" style="font-size:13px;width:100%;text-align:center;" onclick="copyText('${vaultPassword.replace(/'/g, "\\'")}', '🔑 Password Copied!')">${vaultPassword}</div>
         ` : '';
 
         document.getElementById('identity-data-box').innerHTML = resultTextHTML + passwordBlockHTML;
