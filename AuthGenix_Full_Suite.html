@@ -1087,22 +1087,41 @@
     // ── STRICT NO-REPEAT TRACKING (FULL NAME & USERNAME NEVER REPEAT) ──
     const USED_STORAGE_KEY = 'jih4d_used_data_v2';
 
+    // Keep the used history in memory. Reading and rewriting a large localStorage
+    // array for every candidate was the main source of the generation slowdown.
+    let usedItemsCache = null;
+    let usedSaveTimer = null;
+
     function getUsedSet() {
+        if (usedItemsCache) return usedItemsCache;
         try {
             const raw = localStorage.getItem(USED_STORAGE_KEY);
-            return raw ? new Set(JSON.parse(raw)) : new Set();
+            usedItemsCache = new Set(raw ? JSON.parse(raw) : []);
         } catch (e) {
-            return new Set();
+            usedItemsCache = new Set();
         }
+        return usedItemsCache;
+    }
+
+    function persistUsedSet() {
+        try {
+            localStorage.setItem(USED_STORAGE_KEY, JSON.stringify([...getUsedSet()]));
+        } catch (e) {}
     }
 
     function markItemAsUsed(key) {
-        try {
-            const usedSet = getUsedSet();
-            usedSet.add(key);
-            localStorage.setItem(USED_STORAGE_KEY, JSON.stringify([...usedSet]));
-        } catch (e) {}
+        const usedSet = getUsedSet();
+        if (usedSet.has(key)) return;
+        usedSet.add(key);
+        clearTimeout(usedSaveTimer);
+        usedSaveTimer = setTimeout(persistUsedSet, 120);
     }
+
+    // Flush pending history when the tab is closed or navigated away.
+    window.addEventListener('pagehide', () => {
+        if (usedSaveTimer) clearTimeout(usedSaveTimer);
+        persistUsedSet();
+    });
 
     function initCleanAccountData() {
         const cleanData = {};
@@ -1122,6 +1141,7 @@
     function resetUsedHistory() {
         if (confirm("আপনি কি ব্যবহৃত সব নামের হিস্ট্রি রিসেট করে আবার ৩,০০০ নাম নতুনভাবে শুরু করতে চান?")) {
             localStorage.removeItem(USED_STORAGE_KEY);
+            usedItemsCache = new Set();
             window.accountData = initCleanAccountData();
             showToastMessage("🔄 All 3,000 Names Reset!");
             showMainMenu();
@@ -1139,7 +1159,7 @@
                 preloader.style.visibility = 'hidden';
                 setTimeout(() => { preloader.style.display = 'none'; }, 500);
             }
-        }, 800); 
+        }, 120); 
     });
 
     function openAdminPanel() {
@@ -1781,23 +1801,35 @@
         const usedSet = getUsedSet();
         if (!firstList.length || !lastList.length) return null;
 
-        // Pick randomly from every unused first+last combination. Source lists are never mutated.
-        const available = [];
-        for (const firstVal of firstList) {
-            const fName = typeof firstVal === 'object' && firstVal !== null ? firstVal.name : firstVal;
-            for (const lastVal of lastList) {
-                const lName = typeof lastVal === 'object' && lastVal !== null ? lastVal.name : lastVal;
-                const normalizedPair = `${String(fName).toLowerCase()}_${String(lName).toLowerCase()}`;
-                const pairKey = `${selCoun}_pair_${normalizedPair}`;
-                const legacyMaleKey = `${selCoun}_male_pair_${normalizedPair}`;
-                const legacyFemaleKey = `${selCoun}_female_pair_${normalizedPair}`;
-                if (!usedSet.has(pairKey) && !usedSet.has(legacyMaleKey) && !usedSet.has(legacyFemaleKey)) available.push({ f: fName, l: lName, pairKey });
+        // O(1) random sampling instead of scanning every first/last combination.
+        // The fallback scan runs only when the random pool is nearly exhausted.
+        const pickName = value => typeof value === 'object' && value !== null ? value.name : value;
+        const maxAttempts = Math.min(500, firstList.length * lastList.length);
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            const fName = pickName(firstList[Math.floor(Math.random() * firstList.length)]);
+            const lName = pickName(lastList[Math.floor(Math.random() * lastList.length)]);
+            const normalizedPair = `${String(fName).toLowerCase()}_${String(lName).toLowerCase()}`;
+            const pairKey = `${selCoun}_pair_${normalizedPair}`;
+            if (!usedSet.has(pairKey) && !usedSet.has(`${selCoun}_male_pair_${normalizedPair}`) && !usedSet.has(`${selCoun}_female_pair_${normalizedPair}`)) {
+                markItemAsUsed(pairKey);
+                return { f: fName, l: lName };
             }
         }
-        if (!available.length) return null;
-        const chosen = available[Math.floor(Math.random() * available.length)];
-        markItemAsUsed(chosen.pairKey);
-        return { f: chosen.f, l: chosen.l };
+
+        // Rare fallback: find an unused pair without allocating a huge temporary array.
+        for (const firstVal of firstList) {
+            const fName = pickName(firstVal);
+            for (const lastVal of lastList) {
+                const lName = pickName(lastVal);
+                const normalizedPair = `${String(fName).toLowerCase()}_${String(lName).toLowerCase()}`;
+                const pairKey = `${selCoun}_pair_${normalizedPair}`;
+                if (!usedSet.has(pairKey) && !usedSet.has(`${selCoun}_male_pair_${normalizedPair}`) && !usedSet.has(`${selCoun}_female_pair_${normalizedPair}`)) {
+                    markItemAsUsed(pairKey);
+                    return { f: fName, l: lName };
+                }
+            }
+        }
+        return null;
     }
 
     function getSequentialUsername() {
